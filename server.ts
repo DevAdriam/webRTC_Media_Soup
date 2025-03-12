@@ -2,17 +2,25 @@ import express from "express";
 import http from "http";
 import { Server } from "socket.io";
 import mediasoup from "mediasoup";
+import cors from "cors";
 
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: "*" } });
 
+app.use(cors()); // Enable CORS for all origins
+app.use(express.json()); // Enable JSON parsing
+
 let worker = await mediasoup.createWorker();
 let router = await worker.createRouter({
-  mediaCodecs: [{ kind: "video", mimeType: "video/VP8", clockRate: 90000 }],
+  mediaCodecs: [
+    { kind: "video", mimeType: "video/VP8", clockRate: 90000 },
+    // { kind: "video", mimeType: "video/H264", clockRate: 90000 },
+    { kind: "audio", mimeType: "audio/opus", clockRate: 48000, channels: 2 },
+  ],
 });
 
-let transports = new Map(); // Stores transports per user
+let transports = new Map(); // Stores transports per userk
 let producers = new Map(); // Stores producers per user
 let consumers = new Map(); // Stores consumers per user
 
@@ -26,12 +34,21 @@ io.on("connection", (socket) => {
         producerId: producer.id,
       })
     );
-    console.log(activeProducers);
-    callback(activeProducers);
+
+    activeProducers.forEach((item) => {
+      {
+        io.emit("newStream", {
+          producerId: item.producerId,
+          userId: item.userId,
+        });
+      }
+    });
+
+    callback("reach");
   });
 
   // Send Router Capabilities
-  socket.on("getRouterRtpCapabilities", (callback) => {
+  socket.on("getRouterRtpCapabilities", ({ c1 }, callback) => {
     callback(router.rtpCapabilities);
   });
 
@@ -50,7 +67,6 @@ io.on("connection", (socket) => {
       transport.on("icestatechange", (state) => {
         console.log(`ICE state changed: ${state}`);
       });
-
       callback({
         id: transport.id,
         iceParameters: transport.iceParameters,
@@ -67,6 +83,9 @@ io.on("connection", (socket) => {
   socket.on(
     "connectTransport",
     async ({ transportId, dtlsParameters }, callback) => {
+      console.log({
+        dtlsParameters,
+      });
       const transport = transports.get(socket.id);
       if (!transport) {
         console.error("Transport not found for user:", socket.id);
@@ -76,7 +95,7 @@ io.on("connection", (socket) => {
       try {
         await transport.connect({ dtlsParameters });
         console.log("transporter is connected!!");
-        callback();
+        callback("helllo world");
       } catch (error) {
         console.error("Transport connection failed:", error);
         callback({ error: error.message });
@@ -88,18 +107,26 @@ io.on("connection", (socket) => {
   socket.on(
     "produce",
     async ({ transportId, kind, rtpParameters }, callback) => {
+      console.log({
+        kind,
+        rtpParameters,
+      });
+      console.log({
+        codecs: rtpParameters.codecs,
+      });
       const transport = transports.get(socket.id);
       if (!transport) {
         console.error("No transport found for producer:", socket.id);
         return;
       }
 
+      console.log("Enter produced with transportId : ", transportId);
+
       try {
         const producer = await transport.produce({ kind, rtpParameters });
-
         producers.set(socket.id, producer);
         io.emit("newStream", { producerId: producer.id, userId: socket.id });
-
+        console.log({ producerId: producer.id });
         callback(producer.id);
       } catch (error) {
         console.error("Error producing stream:", error);
@@ -118,6 +145,7 @@ io.on("connection", (socket) => {
       }
 
       const producer = [...producers.values()].find((p) => p.id === producerId);
+
       if (!producer) {
         console.error("Producer not found:", producerId);
         return callback({ error: "Producer not found" });
@@ -128,8 +156,6 @@ io.on("connection", (socket) => {
         rtpCapabilities: router.rtpCapabilities,
         paused: false,
       });
-
-      consumers.set(socket.id, consumer);
 
       callback({
         id: consumer.id,
@@ -176,6 +202,16 @@ io.on("connection", (socket) => {
       transports.delete(socket.id);
     }
   });
+});
+
+app.get("/streams", (req, res) => {
+  const activeProducers = [...producers.entries()].map(
+    ([userId, producer]) => ({
+      userId,
+      producerId: producer.id,
+    })
+  );
+  res.json(activeProducers);
 });
 
 server.listen(3000, () =>
